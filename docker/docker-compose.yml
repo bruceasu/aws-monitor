@@ -1,0 +1,108 @@
+version: "3.9"
+
+services:
+
+  aws_collect:
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - .:/work
+      - ${USERPROFILE}/.aws:/root/.aws:ro
+    environment:
+      - AWS_PROFILE=default # 改成你的 profile
+      - TEAMS_WEBHOOK=${TEAMS_WEBHOOK}
+    env_file:
+      - ./env/pg.env
+      - ./env/openai.env
+    command: >
+      bash -lc "
+        pip install --no-cache-dir boto3 botocore &&
+        python scripts/collect_aws_rds_diag.py
+          --db-instance ${DB_INSTANCE}
+          --region ${AWS_REGION}
+          --start '${START_TIME}'
+          --end '${END_TIME}'
+          --period 60
+          --out output/aws_rds
+      "
+
+  pg_collect:
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - .:/work
+    env_file:
+      - ./env/pg.env
+    command: >
+      bash -lc "
+        pip install --no-cache-dir psycopg2-binary &&
+        python scripts/collect_pg_diag.py
+          --out output/postgresql
+          --long-query-seconds 30
+          --long-xact-seconds 120
+      "
+
+  analyze:
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - .:/work
+    env_file:
+      - ./env/openai.env
+    command: >
+      bash -lc "
+        pip install --no-cache-dir openai &&
+        python scripts/analyze_incident_ai.py
+          --aws-input output/aws_rds
+          --pg-input output/postgresql
+          --output output/final_rca_report.md
+          --model ${MODEL}
+          --dump-evidence
+      "
+
+  incident:
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - .:/work
+      - ${USERPROFILE}/.aws:/root/.aws:ro
+      - pip_cache:/root/.cache/pip
+    env_file:
+      - ./env/pg.env
+      - ./env/openai.env
+    environment:
+      - AWS_PROFILE=default
+      - DB_INSTANCE=${DB_INSTANCE}
+      - AWS_REGION=${AWS_REGION}
+      - START_TIME=${START_TIME}
+      - END_TIME=${END_TIME}
+      - MODEL=${MODEL}
+    command: >
+      bash -lc "
+        pip install boto3 botocore psycopg2-binary openai &&
+        python scripts/run_incident.py
+      "
+  trigger:
+    image: python:3.12-slim
+    working_dir: /work
+    volumes:
+      - .:/work
+      - ${USERPROFILE}/.aws:/root/.aws:ro
+      - pip_cache:/root/.cache/pip
+    env_file:
+      - ./env/pg.env
+      - ./env/openai.env
+    environment:
+      - AWS_PROFILE=default
+      - DB_INSTANCE=${DB_INSTANCE}
+      - AWS_REGION=${AWS_REGION}
+      - MODEL=${MODEL}
+      - TEAMS_WEBHOOK=${TEAMS_WEBHOOK}
+      # - DB_PASSWORD_PARAM=/rca/db/password
+    command: >
+      bash -lc "
+        pip install boto3 botocore psycopg2-binary openai requests &&
+        python scripts/check_trigger.py
+      "    
+volumes:
+  pip_cache:
